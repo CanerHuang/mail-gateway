@@ -1,0 +1,47 @@
+[Unit]
+Description=maild gRPC mail gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 預期佈署 layout（與 build.sh 產出的 tar.gz 對齊）：
+#   /opt/maild/maild                    # 由 build.sh 產出
+#   /opt/maild/conf/maild.toml          # 啟動期設定（read-only，含 SMTP 密碼，權限 600）
+#   /opt/maild/certs/                   # server.crt、server.key、ca.crt（不放 ca.key）
+#   /opt/maild/data/spool/              # 非同步佇列，spool_dir 相對於 WorkingDirectory
+#
+# 安裝建議：
+#   useradd --system --home /opt/maild --shell /usr/sbin/nologin maild
+#   chown -R maild:maild /opt/maild
+#   chmod 600 /opt/maild/conf/maild.toml /opt/maild/certs/server.key
+#   systemctl enable --now maild
+#
+# 換憑證、修改 [senders]／[clients] 後執行 systemctl reload maild，不需要重啟。
+Type=simple
+User=maild
+Group=maild
+WorkingDirectory=/opt/maild
+ExecStart=/opt/maild/maild
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65535
+# 應大於 maild.toml 的 server.shutdown_timeout，讓進行中的寄送有機會收尾。
+TimeoutStopSec=60s
+
+# === Hardening ===
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+# 只有 data/ 需要可寫（非同步佇列）；conf/ 與 certs/ 只讀。
+ReadWritePaths=/opt/maild/data
+
+[Install]
+WantedBy=multi-user.target

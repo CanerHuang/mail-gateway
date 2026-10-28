@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package mail.api.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "mail/api/v1;api";
+
+// MailAPI 讓其他服務透過 gRPC 寄信；SMTP 連線與寄件帳號統一由 gateway 管理，
+// 呼叫端不需要各自設定 mail。
+//
+// 提供同步（SendMail）與非同步（QueueMail）兩種寄送，由呼叫端選擇。兩者的
+// 「成功」都只代表 gateway 設定的 SMTP server 已收下郵件，不代表已送達收件匣，
+// 之後仍可能退信。gateway 不提供查詢郵件，寄送結果記在 gateway log。
+//
+// 連線採 mTLS：呼叫端必須出示由 gateway 信任的 CA 簽發的 client 憑證。
+// gateway 以憑證的 CN 識別呼叫端，並依設定檔的呼叫端名單決定可用的寄件者；
+// 不在名單上的呼叫端會被拒絕。
+service MailAPI {
+  // 同步寄送：等 SMTP server 收下才回應，失敗直接回錯誤。
+  // SMTP 寄送可能需要數秒，呼叫端應設定足夠的 deadline。
+  // 超過這個呼叫端的寄送量上限，或寄件帳號已達每日上限時回 ResourceExhausted。
+  // 需要在呼叫端名單上。
+  rpc SendMail(SendMailRequest) returns (SendMailResponse);
+
+  // 非同步寄送：驗證後存入佇列就回應，寄送與失敗重試由 gateway 在背景處理。
+  // 回應成功只代表 gateway 已收下，不保證寄出。
+  // gateway 不做去重：呼叫端沒收到回應就重送時，可能排入兩封相同的郵件。
+  // 超過這個呼叫端的寄送量上限，或佇列已滿時回 ResourceExhausted。
+  // 需要在呼叫端名單上。
+  rpc QueueMail(QueueMailRequest) returns (QueueMailResponse);
+
+  // 查詢這個呼叫端可用的寄件者，依別名排序；Mail.sender 只能使用這裡列出的別名。
+  // 需要在呼叫端名單上。
+  rpc ListSenders(google.protobuf.Empty) returns (ListSendersResponse);
+
+  // 回傳由 build.sh 透過 -ldflags 注入的 version / commit / date。
+  // 只需通過 mTLS 握手，不檢查呼叫端名單。
+  rpc VersionGet(google.protobuf.Empty) returns (VersionInfo);
+}
+
+message Address {
+  string address = 1;  // e.g. "alice@example.com"
+  string name    = 2;  // 顯示名稱，可留空
+}
+
+// 郵件內容，SendMail 與 QueueMail 共用。
+message Mail {
+  // 寄件者別名，必須是 ListSenders 列出的別名；留空則使用這個呼叫端的預設寄件者。
+  // 寄件地址與 SMTP 帳號由 gateway 依別名決定，呼叫端不必知道。
+  string sender = 1;
+
+  // 寄件者顯示名稱；留空時使用該寄件者在設定檔的顯示名稱。
+  string sender_name = 2;
+
+  // to / cc / bcc 合計至少一位收件者，上限由設定檔決定。
+  repeated Address to       = 3;
+  repeated Address cc       = 4;
+  repeated Address bcc      = 5;
+  repeated Address reply_to = 6;
+
+  string subject = 7;
+
+  // text_body 與 html_body 至少擇一；兩者皆有時以 multipart/alternative 寄出。
+  string text_body = 8;
+  string html_body = 9;
+
+  // 附件內容直接放在 request 中，合計大小不得超過 gateway 設定的上限。
+  repeated Attachment attachments = 10;
+
+  // 呼叫端自訂標籤，不會寫進郵件，只寫進 gateway log 方便對帳；數量與長度上限由設定檔決定。
+  // 範例：{"order_id": "A1234"}
+  map<string, string> labels = 11;
+}
+
+message Attachment {
+  string filename = 1;
+
+  // 留空時依 filename 副檔名推斷。
+  string content_type = 2;
+
+  bytes content = 3;
+
+  // 設定時以 inline 方式附加，可在 html_body 以 <img src="cid:{content_id}"> 引用。
+  string content_id = 4;
+}
+
+message SendMailRequest {
+  Mail mail = 1;
+}
+
+message SendMailResponse {
+  // gateway 產生的郵件 ID，log 以此記錄寄送結果。
+  string mail_id = 1;
+
+  // 郵件 Message-ID header 的值，不含前後的 <>，例如 "01JBXK3Q9V8M2T4N6P0R5S7W9Y@example.com"；
+  // 可用來比對收件端或 SMTP server 的 log。
+  string header_message_id = 2;
+
+  // SMTP server 收下郵件時的回應，例如 "250 2.0.0 OK queued as 4A1B2C"。
+  string smtp_response = 3;
+
+  google.protobuf.Timestamp sent_at = 4;
+}
+
+message QueueMailRequest {
+  Mail mail = 1;
+
+  // 指定寄送時間；留空或早於現在則立即寄送，最晚不可超過設定檔的上限（預設 7 天後）。
+  google.protobuf.Timestamp send_at = 2;
+}
+
+message QueueMailResponse {
+  // gateway 產生的郵件 ID，log 以此記錄寄送結果。
+  string mail_id = 1;
+
+  // 寄出時 Message-ID header 的值，不含前後的 <>；存入佇列時就已決定。
+  string header_message_id = 2;
+}
+
+message Sender {
+  string alias      = 1;  // 寄件者別名，填在 Mail.sender
+  string address    = 2;  // 寄件地址
+  string name       = 3;  // 預設顯示名稱
+  bool   is_default = 4;  // Mail.sender 留空時使用的寄件者
+}
+
+message ListSendersResponse {
+  repeated Sender senders = 1;
+}
+
+message VersionInfo {
+  string version = 1;  // e.g. "v1.0.0" or "dev"
+  string commit  = 2;  // git short SHA or "unknown"
+  string date    = 3;  // "260517" (production) or "260517T123456Z" (--dev)
+}

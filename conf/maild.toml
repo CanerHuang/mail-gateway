@@ -1,0 +1,160 @@
+# maild 啟動期設定（read-only）：程式只讀不寫，除註明可省略者外所有欄位必填，啟動時嚴格驗證。
+# 相對路徑以啟動時的工作目錄（CWD）為基準。
+# 本檔含 SMTP 密碼，權限應設為只有 maild 執行帳號可讀（chmod 600）。
+#
+# 收到 SIGHUP（systemctl reload）時只重新載入以下內容，其他欄位修改後需重啟才會生效：
+#   - [tls] 指向的憑證、私鑰與 CA 檔案內容
+#   - [senders] 與 [clients]
+# 重新載入或驗證失敗時沿用舊設定並記 error log，不會因此停機。
+
+[server]
+# gRPC 監聽位址，格式為 host:port。host 留空表示綁定所有介面。
+listen_address = ':30053'
+# 新連線完成 TLS 與 HTTP/2 handshake 的時限，逾時即關閉該連線。
+# 此值同時是 graceful shutdown 時間的下限，不宜調大。
+connection_timeout = '5s'
+# graceful shutdown 的等待上限；逾時仍有連線未關閉時改為強制中斷。
+# 進行中的同步寄送也要在這段時間內完成，因此應大於 smtp.timeout，
+# 並小於 systemd 的 TimeoutStopSec（預設 90s）。
+shutdown_timeout = '35s'
+# 是否記錄連線的建立與關閉（含 peer address 與 client 憑證 CN）；省略等同 false。
+connection_log = false
+# 單一 request 的大小上限（MiB），包含內文與附件；gRPC 預設為 4 MiB。
+# 必須大於 mail.max_attachments_size_mib，留空間給內文。
+max_request_size_mib = 4
+
+# gRPC server keepalive 與連線存活時間設定。
+[server.keepalive]
+# 連線閒置多久後主動送 keepalive ping 探活。
+time = '10s'
+# 送出 ping 後等待回應的逾時，逾時未收到回應即斷線。
+timeout = '3s'
+# 允許 client 端 keepalive ping 的最短間隔，過於頻繁會被視為違規而中斷連線。
+min_time = '5s'
+# 連線存活的上限，到期後要求 client 重新連線（重新做 TLS 握手）。
+# 換掉的 CA／憑證只在新的握手生效，舊連線最晚在這段時間後重建。
+# （呼叫端名單每次 RPC 都會檢查，從 [clients] 刪除後 reload 立即生效，不受此值影響。）
+max_connection_age = '1h'
+# 連線到達 max_connection_age 後，等待進行中 RPC 完成的時限；應大於 smtp.timeout。
+max_connection_age_grace = '35s'
+
+# mTLS 設定。
+[tls]
+# gateway 的 server 憑證與私鑰（PEM）。憑證的 SAN 須包含呼叫端連線用的 DNS 名稱或 IP。
+cert_file = 'certs/server.crt'
+key_file = 'certs/server.key'
+# 只接受 TLS 1.3，並要求 client 出示由下列 CA 簽發的憑證。
+# 用來驗證 client 憑證的 CA 憑證（PEM）。gateway 不存放各呼叫端的憑證，只要有簽發它們的 CA 即可。
+# 平常只放一張；換 CA 的過渡期可把新舊 CA 串接在同一個檔案裡：
+#   cat new-ca.crt old-ca.crt > certs/ca.crt
+client_ca_file = 'certs/ca.crt'
+# 憑證剩餘有效期少於此值時記 warning log；gateway 自己的憑證與 client 憑證都會檢查。
+expiry_warning = '720h'
+
+# 所有寄件帳號共用的 SMTP 寄送設定；各帳號的 SMTP server 與帳密設定在 [senders.<別名>.smtp]。
+[smtp]
+# 單次寄送（連線、交握到送完內容）的時限。
+timeout = '30s'
+# 同步寄送（SendMail）同時開啟的 SMTP 連線數上限；超過時排隊等待。
+max_sync_connections = 4
+# 寄件帳號暫停的時間：達到每日上限（Gmail 回 550 5.4.5）或登入失敗（535）時暫停該帳號。
+# 暫停期間同步寄送直接回錯誤（額度用完回 ResourceExhausted，登入失敗回 Unavailable），
+# 佇列中的郵件延後到暫停結束且不扣重試次數；暫停結束後先試寄一封，仍失敗就再暫停。
+sender_pause = '1h'
+
+# 非同步寄送（QueueMail）的佇列設定。佇列就是 spool_dir 底下的檔案，不使用資料庫。
+[queue]
+# 佇列檔案的存放資料夾：每封郵件連同附件存成一個 .mail 檔，寄出或判定失敗後即刪除。
+# 底下會自動建立 tmp/（寫入中）與 queue/（等待寄送）兩個子資料夾（權限 0700）。
+# 同步寄送（SendMail）直接從記憶體寄出，不會寫檔。
+spool_dir = 'data/spool'
+# 掃描 queue/ 的間隔；QueueMail 收下新郵件時會立刻觸發一次，不必等到下一輪。
+scan_interval = '1m'
+# 背景寄送同時開啟的 SMTP 連線數，與同步寄送的連線分開計算，
+# 佇列塞車時不會卡住同步請求。
+workers = 2
+# 最多嘗試寄送幾次（含第一次）；用完仍失敗即刪除檔案並記 error log。
+max_attempts = 5
+# 第一次重試前的等待時間，之後每次加倍，最多到 retry_max_interval。
+retry_initial_interval = '1m'
+retry_max_interval = '1h'
+# 佇列最多同時存放幾封郵件；已滿時 QueueMail 回 ResourceExhausted，避免塞滿磁碟。
+# 每封檔案最大約 5 MiB（附件 base64 編碼後約 1.37 倍，加上內文），1000 封最多約佔 5 GB。
+max_queued_mails = 1000
+# send_at 最多可排到多久以後（168h = 7 天），超過回 InvalidArgument。只有非同步寄送（QueueMail）有 send_at。
+max_schedule_ahead = '168h'
+
+[mail]
+# 單封郵件 to + cc + bcc 合計的收件者上限，所有寄件帳號共用；
+# 不可超過各寄件帳號 SMTP server 的上限（Gmail 透過 SMTP 寄送時每封上限為 100）。
+max_recipients = 50
+# 單封郵件所有附件合計的大小上限（MiB）。
+# Gmail 寄送上限雖為 25 MB，但收件端的郵件伺服器也可能有大小限制，因此預設保守取 2 MiB。
+max_attachments_size_mib = 2
+# Mail.labels 的數量上限，以及每個 key／value 的最大字數（中文一個字算一個）。
+# key 只能用英數字、底線、點與連字號；value 不可含換行等控制字元。超過回 InvalidArgument。
+# 佇列檔第一行上限 64 KiB，載入時會以 max_recipients 與這三個值估算最壞情況，超過即拒絕啟動。
+max_labels = 10
+max_label_key_length = 64
+max_label_value_length = 256
+
+[log]
+# 郵件 log 中文字欄位（主旨、收件者、labels 的 value、SMTP 回應與錯誤訊息）的最大顯示字數，
+# 超過的部分截斷並標示省略的字數；0 表示不限制。收件者人數另以 rcpt_count 完整記錄。
+max_field_length = 200
+
+# 寄件帳號：以別名為 key，每個別名是一個獨立的 SMTP 帳號，各自設定 SMTP server 與帳密，
+# 不同帳號可以用不同的 server。別名只能用英數字、底線與連字號。
+# 呼叫端以 Mail.sender 填別名選擇寄件帳號，[clients] 也以別名引用寄件者；
+# 寄件地址改變時只需改這裡，呼叫端不必修改。
+[senders.service]
+address = 'service@example.com'
+# 預設顯示名稱；Mail.sender_name 留空時使用。
+name = 'Example Service'
+
+[senders.service.smtp]
+host = 'smtp.gmail.com'
+# 587 通常搭配 starttls，465 搭配 tls。
+port = 587
+# 連線加密方式：
+#   'starttls' — 先以明文連線，再升級為 TLS
+#   'tls'      — 連線一開始就是 TLS
+#   'none'     — 不加密，只適用於內網 relay
+security = 'starttls'
+# SMTP AUTH 帳密；兩者皆留空表示不做認證（例如內網 relay 以來源 IP 放行）。
+# security = 'none' 時必須留空：net/smtp 不會在未加密的連線上送出密碼。
+# Gmail／Google Workspace 的寄件地址必須與登入帳號相同；password 請用 App Password
+# （帳號須開啟兩步驟驗證），不要用帳號本身的密碼。
+username = 'service@example.com'
+password = 'change_me'
+
+[senders.billing]
+address = 'billing@example.com'
+name = 'Example Billing'
+
+[senders.billing.smtp]
+host = 'smtp.example.com'
+port = 465
+security = 'tls'
+username = 'billing@example.com'
+password = 'change_me'
+
+# 呼叫端名單：以 client 憑證的 CN 為 key，不在名單上的呼叫端一律拒絕。
+# CN 只含英數字、底線與連字號時可直接寫；含其他字元（例如 .）時要加引號：[clients."order.service"]
+# 撤銷呼叫端就是把它從這裡刪掉，再執行 systemctl reload。
+[clients.order-service]
+# 可用的寄件者別名，必須是 [senders] 定義過的別名。
+senders = ['service', 'billing']
+# Mail.sender 留空時使用的寄件者別名，必須在 senders 之中。
+default_sender = 'service'
+# 寄送量上限：最近 rate_limit_window 內最多收下幾封（SendMail 與 QueueMail 合計，背景重試不另計），
+# 0 表示不限制；超過回 ResourceExhausted。用來避免單一呼叫端在短時間內用光共用寄件帳號的額度
+# （Gmail 每個帳號每天 2,000 封）。計數只存在記憶體，gateway 重啟後歸零。
+rate_limit = 200
+rate_limit_window = '1h'
+
+[clients.member-service]
+senders = ['service']
+default_sender = 'service'
+rate_limit = 100
+rate_limit_window = '1h'

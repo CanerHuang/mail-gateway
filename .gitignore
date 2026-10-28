@@ -1,0 +1,7 @@
+/local_*
+tmp/
+dist/
+# 本機執行產生的佇列與測試憑證（含私鑰），不可提交
+/data/
+/certs/
+/maild
