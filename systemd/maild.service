@@ -7,8 +7,9 @@ Wants=network-online.target
 # 預期佈署 layout（與 build.sh 產出的 tar.gz 對齊）：
 #   /opt/maild/maild                    # 由 build.sh 產出
 #   /opt/maild/conf/maild.toml          # 啟動期設定（read-only，含 SMTP 密碼，權限 600）
-#   /opt/maild/certs/                   # server.crt、server.key、ca.crt（不放 ca.key）
-#   /opt/maild/data/spool/              # 非同步佇列，spool_dir 相對於 WorkingDirectory
+#   /opt/maild/certs/                   # 由簽發機的 server.tar.gz 解開：server.key、server.crt、ca.crt
+#   /opt/maild/data/spool/              # 非同步佇列，spool_dir 相對於 WorkingDirectory；
+#                                       # data/ 必須存在（ReadWritePaths），tar.gz 已內含
 #
 # 安裝建議：
 #   useradd --system --home /opt/maild --shell /usr/sbin/nologin maild

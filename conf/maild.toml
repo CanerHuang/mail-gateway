@@ -9,7 +9,7 @@
 
 [server]
 # gRPC 監聽位址，格式為 host:port。host 留空表示綁定所有介面。
-listen_address = ':30053'
+listen_address = ':20050'
 # 新連線完成 TLS 與 HTTP/2 handshake 的時限，逾時即關閉該連線。
 # 此值同時是 graceful shutdown 時間的下限，不宜調大。
 connection_timeout = '5s'

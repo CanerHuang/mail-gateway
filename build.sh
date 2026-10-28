@@ -6,8 +6,9 @@
 #      proto stay in sync.
 #   2. go build the daemon binary into the stage directory, injecting
 #      Version/Commit/Date via -ldflags -X.
-#   3. Stage runtime assets (toml example, cert.sh) alongside the binary and
-#      tar the result.
+#   3. Stage runtime assets (toml example, systemd unit) alongside the binary
+#      and tar the result. cert.sh is not shipped: it runs on the signing
+#      machine, not on the gateway.
 #
 # Usage:
 #   ./build.sh                            # linux/amd64, compile only (no tarball)
@@ -105,13 +106,14 @@ protoc \
 echo "[2/${TOTAL_STEPS}] staging release directory at ${STAGE_DIR}"
 mkdir -p "${BUILD_DIR}"
 rm -rf "${STAGE_DIR}"
-mkdir -p "${STAGE_DIR}/conf" "${STAGE_DIR}/certs" "${STAGE_DIR}/scripts"
+# data/ 必須存在：systemd unit 的 ReadWritePaths 指向它，不存在時服務無法啟動（226/NAMESPACE）。
+mkdir -p "${STAGE_DIR}/conf" "${STAGE_DIR}/certs" "${STAGE_DIR}/data" "${STAGE_DIR}/systemd"
 
 echo "[3/${TOTAL_STEPS}] building maild binary into stage (linux/${GOARCH_TARGET}) version=${VERSION} commit=${COMMIT} date=${DATE}"
 CGO_ENABLED=0 GOOS=linux GOARCH="${GOARCH_TARGET}" \
     go build -trimpath -ldflags="${LDFLAGS}" -o "${STAGE_DIR}/maild" .
 cp "${PROJECT_ROOT}/conf/maild.toml" "${STAGE_DIR}/conf/maild.toml.example"
-cp "${PROJECT_ROOT}/scripts/cert.sh" "${STAGE_DIR}/scripts/cert.sh"
+cp "${PROJECT_ROOT}/systemd/maild.service" "${STAGE_DIR}/systemd/maild.service"
 
 ARCHIVE=""
 if [ "${DO_TAR}" = "1" ]; then

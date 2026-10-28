@@ -17,6 +17,7 @@
 ```text
 mail-gateway/
 ├── main.go                     # 啟動流程：載入設定、啟動背景寄送與 gRPC server、處理 SIGHUP／SIGTERM
+├── cmd/mailclient/             # 簡易 client：以 mTLS 呼叫 SendMail／QueueMail 寄一封測試信
 ├── conf/maild.toml             # 啟動期設定（read-only），各欄位說明見檔案內註解
 ├── proto/v1/                   # gRPC 介面定義 (mail.proto)
 ├── internal/
@@ -67,8 +68,8 @@ go test -race ./...
 /opt/maild/
 ├── maild                       # build.sh 產出的 binary
 ├── conf/maild.toml             # 啟動期設定（由 maild.toml.example 改名，含 SMTP 密碼，權限 600）
-├── certs/                      # server.crt、server.key、ca.crt（不放 ca.key）
-├── scripts/cert.sh             # 簽發憑證（可在別台機器使用）
+├── certs/                      # 由簽發機產生的 server.tar.gz 解開：server.key、server.crt、ca.crt（不放 ca.key）
+├── systemd/maild.service       # systemd 單位檔
 └── data/spool/                 # 非同步佇列：tmp/（寫入中）、queue/（等待寄送）
 ```
 
@@ -80,15 +81,15 @@ go test -race ./...
 # 1. 建立執行使用者（不允許登入）
 useradd --system --home /opt/maild --shell /usr/sbin/nologin maild
 
-# 2. 解開 tarball、改名 .example、放入憑證（簽發方式見 doc/certificates.md）
+# 2. 解開 tarball、改名 .example、放入簽發機產生的 server.tar.gz（簽發方式見 doc/certificates.md）
 tar -xzf maild.tar.gz -C /opt
 mv /opt/maild/conf/maild.toml.example /opt/maild/conf/maild.toml
-mkdir -p /opt/maild/data
+tar -xzf server.tar.gz -C /opt/maild/certs
 chown -R maild:maild /opt/maild
 chmod 600 /opt/maild/conf/maild.toml /opt/maild/certs/server.key
 
 # 3. 安裝並啟動 systemd unit
-cp systemd/maild.service /etc/systemd/system/
+cp /opt/maild/systemd/maild.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now maild
 ```
@@ -144,28 +145,43 @@ journalctl -u maild | grep 'order_id":"A1234'
 
 ## 以 grpcurl 呼叫 API
 
-server 未啟用 reflection，每次呼叫都要帶 `-proto`；連線需要 client 憑證。下面範例假設工作目錄為專案根、server 監聽 `mailgw.example.com:30053`，`certs/` 裡有 `ca.crt` 與呼叫端的 `order-service.crt`／`.key`。
+server 未啟用 reflection，每次呼叫都要帶 `-proto`；連線需要 client 憑證。下面範例假設工作目錄為專案根、server 監聽 `mailgw.example.com:20050`，呼叫端的 `order-service.tar.gz` 已解到 `client/`。對外的完整範例見 [doc/public/grpcurl.md](doc/public/grpcurl.md)。
 
 ```bash
-G="grpcurl -cacert certs/ca.crt -cert certs/order-service.crt -key certs/order-service.key \
+G="grpcurl -cacert client/ca.crt -cert client/client.crt -key client/client.key \
   -import-path proto/v1 -proto mail.proto"
 
 # 版本資訊（只需通過 mTLS）
-$G mailgw.example.com:30053 mail.api.v1.MailAPI/VersionGet
+$G mailgw.example.com:20050 mail.api.v1.MailAPI/VersionGet
 
 # 可用的寄件者
-$G mailgw.example.com:30053 mail.api.v1.MailAPI/ListSenders
+$G mailgw.example.com:20050 mail.api.v1.MailAPI/ListSenders
 
 # 同步寄送
 $G -d '{"mail":{"to":[{"address":"a@example.com","name":"王小明"}],"subject":"訂單已出貨","text_body":"您好","labels":{"order_id":"A1234"}}}' \
-  mailgw.example.com:30053 mail.api.v1.MailAPI/SendMail
+  mailgw.example.com:20050 mail.api.v1.MailAPI/SendMail
 
 # 非同步寄送，指定寄件者並排程
 $G -d '{"mail":{"sender":"billing","to":[{"address":"a@example.com"}],"subject":"帳單","html_body":"<p>本月帳單</p>"},"send_at":"2026-11-01T01:00:00Z"}' \
-  mailgw.example.com:30053 mail.api.v1.MailAPI/QueueMail
+  mailgw.example.com:20050 mail.api.v1.MailAPI/QueueMail
 ```
 
 附件的 `content` 是 bytes，JSON 裡以 base64 表示，例如 `"attachments":[{"filename":"報價單.pdf","content":"JVBERi0xLjQK..."}]`。
+
+## 測試寄信：mailclient
+
+`cmd/mailclient` 是簡易的 client，用來確認 gateway 的設定、憑證與實際寄送結果，也可以當作呼叫端串接的範例。`-certs` 指向解開的 `<CN>.tar.gz`（`client.crt`、`client.key`、`ca.crt`）：
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o dist/mailclient ./cmd/mailclient
+
+dist/mailclient -addr mailgw.example.com:20050 -certs client -to user@example.com                 # SendMail（同步）
+dist/mailclient -addr mailgw.example.com:20050 -certs client -to user@example.com -queue          # QueueMail（非同步）
+dist/mailclient -addr mailgw.example.com:20050 -certs client -to user@example.com \
+  -sender billing -sender-name 帳務中心 -subject 附件測試 -attach 報價單.pdf
+```
+
+連線用 IP 或其他不在 server 憑證 SAN 裡的名稱時，加上 `-server-name <SAN 裡的名稱>`。所有參數見 `dist/mailclient -h`。
 
 ## Protobuf 編譯
 

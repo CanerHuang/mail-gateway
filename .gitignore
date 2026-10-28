@@ -5,3 +5,6 @@ dist/
 /data/
 /certs/
 /maild
+# 私鑰與 cert.sh 產生的憑證包（內含私鑰），放在任何位置都不可提交
+*.key
+*.tar.gz
